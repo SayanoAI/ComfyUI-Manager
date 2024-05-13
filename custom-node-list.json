@@ -36,6 +36,17 @@
             "description": "This extension provides various nodes to support Lora Block Weight and the Impact Pack. Provides many easily applicable regional features and applications for Variation Seed."
         },
         {
+            "author": "SayanoAI",
+            "title": "Comfy-RVC",
+            "id": "rvc",
+            "reference": "https://github.com/SayanoAI/Comfy-RVC",
+            "files": [
+                "https://github.com/SayanoAI/Comfy-RVC"
+            ],
+            "install_type": "git-clone",
+            "description": "ComfyUI custom nodes for RVC related inference and image generation"
+        },
+        {
             "author": "comfyanonymous",
             "title": "ComfyUI_experiments",
             "id": "comfy-exp",
