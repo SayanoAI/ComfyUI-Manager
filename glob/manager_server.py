@@ -1091,6 +1091,16 @@ def restart(self):
         exit(0)
 
     print(f"\nRestarting... [Legacy Mode]\n\n")
+    
+    import psutil
+    subprocesses = psutil.Process(os.getpid()).children(recursive=True)
+    print(f"\Killing processes... {subprocesses}\n\n")
+    for p in subprocesses:
+        try:
+            p.kill()
+        except Exception as e:
+            print(f"failed to kill {p}: {e}")
+
     if sys.platform.startswith('win32'):
         return os.execv(sys.executable, ['"' + sys.executable + '"', '"' + sys.argv[0] + '"'] + sys.argv[1:])
     else:
