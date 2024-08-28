@@ -1,31 +1,48 @@
+import { api } from "../../scripts/api.js";
 import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js"
-import { ComfyDialog, $el } from "../../scripts/ui.js";
+import { $el, ComfyDialog } from "../../scripts/ui.js";
 import {
-	ShareDialog,
 	SUPPORTED_OUTPUT_NODE_TYPES,
-	getPotentialOutputsAndOutputNodes,
+	ShareDialog,
 	ShareDialogChooser,
+	getPotentialOutputsAndOutputNodes,
 	showOpenArtShareDialog,
 	showShareDialog,
 	showYouMLShareDialog
 } from "./comfyui-share-common.js";
 import { OpenArtShareDialog } from "./comfyui-share-openart.js";
-import { CustomNodesInstaller } from "./custom-nodes-downloader.js";
-import { AlternativesInstaller } from "./a1111-alter-downloader.js";
-import { SnapshotManager } from "./snapshot.js";
-import { ModelInstaller } from "./model-downloader.js";
-import { manager_instance, setManagerInstance, install_via_git_url, install_pip, rebootAPI, free_models } from "./common.js";
-import { ComponentBuilderDialog, load_components, set_component_policy, getPureName } from "./components-manager.js";
+import { free_models, install_pip, install_via_git_url, manager_instance, rebootAPI, setManagerInstance, show_message } from "./common.js";
+import { ComponentBuilderDialog, getPureName, load_components, set_component_policy } from "./components-manager.js";
+import { CustomNodesManager } from "./custom-nodes-manager.js";
+import { ModelManager } from "./model-manager.js";
 import { set_double_click_policy } from "./node_fixer.js";
+import { SnapshotManager } from "./snapshot.js";
 
 var docStyle = document.createElement('style');
 docStyle.innerHTML = `
+.comfy-toast {
+	position: fixed;
+	bottom: 20px;
+	left: 50%;
+	transform: translateX(-50%);
+	background-color: rgba(0, 0, 0, 0.7);
+	color: white;
+	padding: 10px 20px;
+	border-radius: 5px;
+	z-index: 1000;
+	transition: opacity 0.5s;
+}
+
+.comfy-toast-fadeout {
+	opacity: 0;
+}
+
 #cm-manager-dialog {
 	width: 1000px;
 	height: 520px;
 	box-sizing: content-box;
 	z-index: 10000;
+	overflow-y: auto;
 }
 
 .cb-widget {
@@ -520,25 +537,21 @@ async function updateComfyUI() {
 		const response = await api.fetchApi('/comfyui_manager/update_comfyui');
 
 		if (response.status == 400) {
-			app.ui.dialog.show('Failed to update ComfyUI.');
-			app.ui.dialog.element.style.zIndex = 10010;
+			show_message('Failed to update ComfyUI.');
 			return false;
 		}
 
 		if (response.status == 201) {
-			app.ui.dialog.show('ComfyUI has been successfully updated.');
-			app.ui.dialog.element.style.zIndex = 10010;
+			show_message('ComfyUI has been successfully updated.');
 		}
 		else {
-			app.ui.dialog.show('ComfyUI is already up to date with the latest version.');
-			app.ui.dialog.element.style.zIndex = 10010;
+			show_message('ComfyUI is already up to date with the latest version.');
 		}
 
 		return true;
 	}
 	catch (exception) {
-		app.ui.dialog.show(`Failed to update ComfyUI / ${exception}`);
-		app.ui.dialog.element.style.zIndex = 10010;
+		show_message(`Failed to update ComfyUI / ${exception}`);
 		return false;
 	}
 	finally {
@@ -560,39 +573,35 @@ async function fetchUpdates(update_check_checkbox) {
 		const response = await api.fetchApi(`/customnode/fetch_updates?mode=${mode}`);
 
 		if (response.status != 200 && response.status != 201) {
-			app.ui.dialog.show('Failed to fetch updates.');
-			app.ui.dialog.element.style.zIndex = 10010;
+			show_message('Failed to fetch updates.');
 			return false;
 		}
 
 		if (response.status == 201) {
-			app.ui.dialog.show("There is an updated extension available.<BR><BR><P><B>NOTE:<BR>Fetch Updates is not an update.<BR>Please update from <button id='cm-install-customnodes-button'>Install Custom Nodes</button> </B></P>");
+			show_message("There is an updated extension available.<BR><BR><P><B>NOTE:<BR>Fetch Updates is not an update.<BR>Please update from <button id='cm-install-customnodes-button'>Install Custom Nodes</button> </B></P>");
 
 			const button = document.getElementById('cm-install-customnodes-button');
 			button.addEventListener("click",
 				async function() {
 					app.ui.dialog.close();
 
-					if(!CustomNodesInstaller.instance)
-						CustomNodesInstaller.instance = new CustomNodesInstaller(app, self);
-
-					await CustomNodesInstaller.instance.show(CustomNodesInstaller.ShowMode.UPDATE);
+					if(!CustomNodesManager.instance) {
+						CustomNodesManager.instance = new CustomNodesManager(app, self);
+					}
+					await CustomNodesManager.instance.show(CustomNodesManager.ShowMode.UPDATE);
 				}
 			);
 
-			app.ui.dialog.element.style.zIndex = 10010;
 			update_check_checkbox.checked = false;
 		}
 		else {
-			app.ui.dialog.show('All extensions are already up-to-date with the latest versions.');
-			app.ui.dialog.element.style.zIndex = 10010;
+			show_message('All extensions are already up-to-date with the latest versions.');
 		}
 
 		return true;
 	}
 	catch (exception) {
-		app.ui.dialog.show(`Failed to update custom nodes / ${exception}`);
-		app.ui.dialog.element.style.zIndex = 10010;
+		show_message(`Failed to update custom nodes / ${exception}`);
 		return false;
 	}
 	finally {
@@ -615,11 +624,16 @@ async function updateAll(update_check_checkbox, manager_dialog) {
 		const response1 = await api.fetchApi('/comfyui_manager/update_comfyui');
 		const response2 = await api.fetchApi(`/customnode/update_all?mode=${mode}`);
 
-		if (response1.status == 400 || response2.status == 400) {
-			app.ui.dialog.show('Failed to update ComfyUI or several extensions.<BR><BR>See terminal log.<BR>');
-			app.ui.dialog.element.style.zIndex = 10010;
+		if (response2.status == 403) {
+			show_message('This action is not allowed with this security level configuration.');
 			return false;
 		}
+
+		if (response1.status == 400 || response2.status == 400) {
+			show_message('Failed to update ComfyUI or several extensions.<BR><BR>See terminal log.<BR>');
+			return false;
+		}
+
 		if(response1.status == 201 || response2.status == 201) {
 			const update_info = await response2.json();
 
@@ -633,7 +647,7 @@ async function updateAll(update_check_checkbox, manager_dialog) {
 				updated_list = "<BR>UPDATED: "+update_info.updated.join(", ");
 			}
 
-			app.ui.dialog.show(
+			show_message(
 				"ComfyUI and all extensions have been updated to the latest version.<BR>To apply the updated custom node, please <button class='cm-small-button' id='cm-reboot-button5'>RESTART</button> ComfyUI. And refresh browser.<BR>"
 				+failed_list
 				+updated_list
@@ -646,19 +660,15 @@ async function updateAll(update_check_checkbox, manager_dialog) {
 						manager_dialog.close();
 					}
 				});
-
-			app.ui.dialog.element.style.zIndex = 10010;
 		}
 		else {
-			app.ui.dialog.show('ComfyUI and all extensions are already up-to-date with the latest versions.');
-			app.ui.dialog.element.style.zIndex = 10010;
+			show_message('ComfyUI and all extensions are already up-to-date with the latest versions.');
 		}
 
 		return true;
 	}
 	catch (exception) {
-		app.ui.dialog.show(`Failed to update ComfyUI or several extensions / ${exception}`);
-		app.ui.dialog.element.style.zIndex = 10010;
+		show_message(`Failed to update ComfyUI or several extensions / ${exception}`);
 		return false;
 	}
 	finally {
@@ -721,12 +731,13 @@ class ManagerMenuDialog extends ComfyDialog {
 			[
 				$el("button.cm-button", {
 					type: "button",
-					textContent: "Install Custom Nodes",
+					textContent: "Custom Nodes Manager",
 					onclick:
 						() => {
-							if(!CustomNodesInstaller.instance)
-								CustomNodesInstaller.instance = new CustomNodesInstaller(app, self);
-							CustomNodesInstaller.instance.show(CustomNodesInstaller.ShowMode.NORMAL);
+							if(!CustomNodesManager.instance) {
+								CustomNodesManager.instance = new CustomNodesManager(app, self);
+							}
+							CustomNodesManager.instance.show(CustomNodesManager.ShowMode.NORMAL);
 						}
 				}),
 
@@ -735,20 +746,23 @@ class ManagerMenuDialog extends ComfyDialog {
 					textContent: "Install Missing Custom Nodes",
 					onclick:
 						() => {
-							if(!CustomNodesInstaller.instance)
-								CustomNodesInstaller.instance = new CustomNodesInstaller(app, self);
-							CustomNodesInstaller.instance.show(CustomNodesInstaller.ShowMode.MISSING_NODES);
+							if(!CustomNodesManager.instance) {
+								CustomNodesManager.instance = new CustomNodesManager(app, self);
+							}
+							CustomNodesManager.instance.show(CustomNodesManager.ShowMode.MISSING);
 						}
 				}),
 
+				
 				$el("button.cm-button", {
 					type: "button",
-					textContent: "Install Models",
+					textContent: "Model Manager",
 					onclick:
 						() => {
-							if(!ModelInstaller.instance)
-								ModelInstaller.instance = new ModelInstaller(app, self);
-							ModelInstaller.instance.show();
+							if(!ModelManager.instance) {
+								ModelManager.instance = new ModelManager(app, self);
+							}
+							ModelManager.instance.show();
 						}
 				}),
 
@@ -775,9 +789,10 @@ class ManagerMenuDialog extends ComfyDialog {
 					textContent: "Alternatives of A1111",
 					onclick:
 						() => {
-							if(!AlternativesInstaller.instance)
-								AlternativesInstaller.instance = new AlternativesInstaller(app, self);
-							AlternativesInstaller.instance.show();
+							if(!CustomNodesManager.instance) {
+								CustomNodesManager.instance = new CustomNodesManager(app, self);
+							}
+							CustomNodesManager.instance.show(CustomNodesManager.ShowMode.ALTERNATIVES);
 						}
 				}),
 
@@ -899,6 +914,7 @@ class ManagerMenuDialog extends ComfyDialog {
 			['youml', 'YouML'],
 			['matrix', 'Matrix Server'],
 			['comfyworkflows', 'ComfyWorkflows'],
+			['copus', 'Copus'],
 			['all', 'All'],
 		];
 		for (const option of share_options) {
@@ -1237,6 +1253,15 @@ class ManagerMenuDialog extends ComfyDialog {
 					},
 				},
 				{
+					title: "Open 'Copus.io'",
+					callback: () => {
+						const url = "https://www.copus.io";
+						localStorage.setItem("wg_last_visited", url);
+						window.open(url, url);
+						modifyButtonStyle(url);
+					},
+				},
+				{
 					title: "Close",
 					callback: () => {
 						LiteGraph.closeAllContextMenus();
@@ -1280,6 +1305,66 @@ app.registerExtension({
 		separator.style.width = "100%";
 		menu.append(separator);
 
+		try {
+			// new style Manager buttons
+
+			// unload models button into new style Manager button
+			let cmGroup = new (await import("../../scripts/ui/components/buttonGroup.js")).ComfyButtonGroup(
+				new(await import("../../scripts/ui/components/button.js")).ComfyButton({
+					icon: "puzzle",
+					action: () => {
+						if(!manager_instance)
+							setManagerInstance(new ManagerMenuDialog());
+						manager_instance.show();
+					},
+					tooltip: "ComfyUI Manager",
+					content: "Manager",
+					classList: "comfyui-button comfyui-menu-mobile-collapse primary"
+				}).element,
+				new(await import("../../scripts/ui/components/button.js")).ComfyButton({
+					icon: "vacuum-outline",
+					action: () => {
+						free_models();
+					},
+					tooltip: "Unload Models"
+				}).element,
+				new(await import("../../scripts/ui/components/button.js")).ComfyButton({
+					icon: "vacuum",
+					action: () => {
+						free_models(true);
+					},
+					tooltip: "Free model and node cache"
+				}).element,
+				new(await import("../../scripts/ui/components/button.js")).ComfyButton({
+					icon: "share",
+					action: () => {
+						if (share_option === 'openart') {
+							showOpenArtShareDialog();
+							return;
+						} else if (share_option === 'matrix' || share_option === 'comfyworkflows') {
+							showShareDialog(share_option);
+							return;
+						} else if (share_option === 'youml') {
+							showYouMLShareDialog();
+							return;
+						}
+
+						if(!ShareDialogChooser.instance) {
+							ShareDialogChooser.instance = new ShareDialogChooser();
+						}
+						ShareDialogChooser.instance.show();
+					},
+					tooltip: "Share"
+				}).element
+			);
+
+			app.menu?.settingsGroup.element.before(cmGroup.element);
+		}
+		catch(exception) {
+			console.log('ComfyUI is outdated. New style menu based features are disabled.');
+		}
+
+		// old style Manager button
 		const managerButton = document.createElement("button");
 		managerButton.textContent = "Manager";
 		managerButton.onclick = () => {
@@ -1288,7 +1373,6 @@ app.registerExtension({
 				manager_instance.show();
 			}
 		menu.append(managerButton);
-
 
 		const shareButton = document.createElement("button");
 		shareButton.id = "shareButton";

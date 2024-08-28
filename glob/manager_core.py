@@ -23,12 +23,17 @@ sys.path.append(glob_path)
 import cm_global
 from manager_util import *
 
-version = [2, 30, 1]
+version = [2, 50, 2]
 version_str = f"V{version[0]}.{version[1]}" + (f'.{version[2]}' if len(version) > 2 else '')
+
 
 comfyui_manager_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 custom_nodes_path = os.path.abspath(os.path.join(comfyui_manager_path, '..'))
-comfy_path = os.path.abspath(os.path.join(custom_nodes_path, '..'))
+
+comfy_path = os.environ.get('COMFYUI_PATH')
+if comfy_path is None:
+    comfy_path = os.path.abspath(os.path.join(custom_nodes_path, '..'))
+
 channel_list_path = os.path.join(comfyui_manager_path, 'channels.list')
 config_path = os.path.join(comfyui_manager_path, "config.ini")
 startup_script_path = os.path.join(comfyui_manager_path, "startup-scripts")
@@ -92,11 +97,14 @@ def clear_pip_cache():
 def is_blacklisted(name):
     name = name.strip()
 
-    pattern = r'([^<>!=]+)([<>!=]=?)(.*)'
+    pattern = r'([^<>!=]+)([<>!=]=?)([^ ]*)'
     match = re.search(pattern, name)
 
     if match:
         name = match.group(1)
+
+    if name in cm_global.pip_blacklist:
+        return True
 
     if name in cm_global.pip_downgrade_blacklist:
         pips = get_installed_packages()
@@ -118,11 +126,14 @@ def is_installed(name):
     if name.startswith('#'):
         return True
 
-    pattern = r'([^<>!=]+)([<>!=]=?)(.*)'
+    pattern = r'([^<>!=]+)([<>!=]=?)([0-9.a-zA-Z]*)'
     match = re.search(pattern, name)
 
     if match:
         name = match.group(1)
+
+    if name in cm_global.pip_blacklist:
+        return True
 
     if name in cm_global.pip_downgrade_blacklist:
         pips = get_installed_packages()
@@ -181,7 +192,9 @@ class ManagerFuncs:
             print(f"[ComfyUI-Manager] Unexpected behavior: `{cmd}`")
             return 0
 
-        subprocess.check_call(cmd, cwd=cwd)
+        new_env = os.environ.copy()
+        new_env["COMFYUI_PATH"] = comfy_path
+        subprocess.check_call(cmd, cwd=cwd, env=new_env)
 
         return 0
 
@@ -204,7 +217,8 @@ def write_config():
         'double_click_policy': get_config()['double_click_policy'],
         'windows_selector_event_loop_policy': get_config()['windows_selector_event_loop_policy'],
         'model_download_by_agent': get_config()['model_download_by_agent'],
-        'downgrade_blacklist': get_config()['downgrade_blacklist']
+        'downgrade_blacklist': get_config()['downgrade_blacklist'],
+        'security_level': get_config()['security_level'],
     }
     with open(config_path, 'w') as configfile:
         config.write(configfile)
@@ -216,20 +230,30 @@ def read_config():
         config.read(config_path)
         default_conf = config['default']
 
+        # policy migration: disable_unsecure_features -> security_level
+        if 'disable_unsecure_features' in default_conf:
+            if default_conf['disable_unsecure_features'].lower() == 'true':
+                security_level = 'strong'
+            else:
+                security_level = 'normal'
+        else:
+            security_level = default_conf['security_level'] if 'security_level' in default_conf else 'normal'
+
         return {
                     'preview_method': default_conf['preview_method'] if 'preview_method' in default_conf else manager_funcs.get_current_preview_method(),
                     'badge_mode': default_conf['badge_mode'] if 'badge_mode' in default_conf else 'none',
                     'git_exe': default_conf['git_exe'] if 'git_exe' in default_conf else '',
                     'channel_url': default_conf['channel_url'] if 'channel_url' in default_conf else 'https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main',
                     'share_option': default_conf['share_option'] if 'share_option' in default_conf else 'all',
-                    'bypass_ssl': default_conf['bypass_ssl'] if 'bypass_ssl' in default_conf else False,
-                    'file_logging': default_conf['file_logging'] if 'file_logging' in default_conf else True,
+                    'bypass_ssl': default_conf['bypass_ssl'].lower() == 'true' if 'bypass_ssl' in default_conf else False,
+                    'file_logging': default_conf['file_logging'].lower() == 'true' if 'file_logging' in default_conf else True,
                     'default_ui': default_conf['default_ui'] if 'default_ui' in default_conf else 'none',
                     'component_policy': default_conf['component_policy'] if 'component_policy' in default_conf else 'workflow',
                     'double_click_policy': default_conf['double_click_policy'] if 'double_click_policy' in default_conf else 'copy-all',
-                    'windows_selector_event_loop_policy': default_conf['windows_selector_event_loop_policy'] if 'windows_selector_event_loop_policy' in default_conf else False,
-                    'model_download_by_agent': default_conf['model_download_by_agent'] if 'model_download_by_agent' in default_conf else False,
+                    'windows_selector_event_loop_policy': default_conf['windows_selector_event_loop_policy'].lower() == 'true' if 'windows_selector_event_loop_policy' in default_conf else False,
+                    'model_download_by_agent': default_conf['model_download_by_agent'].lower() == 'true' if 'model_download_by_agent' in default_conf else False,
                     'downgrade_blacklist': default_conf['downgrade_blacklist'] if 'downgrade_blacklist' in default_conf else '',
+                    'security_level': security_level
                }
 
     except Exception:
@@ -246,7 +270,8 @@ def read_config():
             'double_click_policy': 'copy-all',
             'windows_selector_event_loop_policy': False,
             'model_download_by_agent': False,
-            'downgrade_blacklist': ''
+            'downgrade_blacklist': '',
+            'security_level': 'normal',
         }
 
 
@@ -313,6 +338,8 @@ def __win_check_git_update(path, do_fetch=False, do_update=False):
     else:
         command = [sys.executable, git_script_path, "--check", path]
 
+    new_env = os.environ.copy()
+    new_env["COMFYUI_PATH"] = comfy_path
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=custom_nodes_path)
     output, _ = process.communicate()
     output = output.decode('utf-8').strip()
@@ -322,10 +349,10 @@ def __win_check_git_update(path, do_fetch=False, do_update=False):
         safedir_path = path.replace('\\', '/')
         try:
             print(f"[ComfyUI-Manager] Try fixing 'dubious repository' error on '{safedir_path}' repo")
-            process = subprocess.Popen(['git', 'config', '--global', '--add', 'safe.directory', safedir_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.Popen(['git', 'config', '--global', '--add', 'safe.directory', safedir_path], env=new_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             output, _ = process.communicate()
 
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.Popen(command, env=new_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             output, _ = process.communicate()
             output = output.decode('utf-8').strip()
         except Exception:
@@ -364,8 +391,10 @@ def __win_check_git_update(path, do_fetch=False, do_update=False):
 
 
 def __win_check_git_pull(path):
+    new_env = os.environ.copy()
+    new_env["COMFYUI_PATH"] = comfy_path
     command = [sys.executable, git_script_path, "--pull", path]
-    process = subprocess.Popen(command, cwd=custom_nodes_path)
+    process = subprocess.Popen(command, env=new_env, cwd=custom_nodes_path)
     process.wait()
 
 
@@ -382,9 +411,15 @@ def execute_install_script(url, repo_path, lazy_mode=False, instant_execution=Fa
             with open(requirements_path, "r") as requirements_file:
                 for line in requirements_file:
                     package_name = remap_pip_package(line.strip())
+
                     if package_name and not package_name.startswith('#'):
-                        install_cmd = [sys.executable, "-m", "pip", "install", package_name]
-                        if package_name.strip() != "":
+                        if '--index-url' in package_name:
+                            s = package_name.split('--index-url')
+                            install_cmd = [sys.executable, "-m", "pip", "install", s[0].strip(), '--index-url', s[1].strip()]
+                        else:
+                            install_cmd = [sys.executable, "-m", "pip", "install", package_name]
+
+                        if package_name.strip() != "" and not package_name.startswith('#'):
                             try_install_script(url, repo_path, install_cmd, instant_execution=instant_execution)
 
         if os.path.exists(install_script_path):
@@ -492,10 +527,16 @@ class GitProgress(RemoteProgress):
 
 def is_valid_url(url):
     try:
+        # Check for HTTP/HTTPS URL format
         result = urlparse(url)
-        return all([result.scheme, result.netloc])
-    except ValueError:
-        return False
+        if all([result.scheme, result.netloc]):
+            return True
+    finally:
+        # Check for SSH git URL format
+        pattern = re.compile(r"^(.+@|ssh:\/\/).+:.+$")
+        if pattern.match(url):
+            return True
+    return False
 
 
 def gitclone_install(files, instant_execution=False, msg_prefix=''):
@@ -966,7 +1007,6 @@ def get_current_snapshot():
     # Get ComfyUI hash
     repo_path = comfy_path
 
-    print(f"comfy_path: {comfy_path}")
     if not os.path.exists(os.path.join(repo_path, '.git')):
         print(f"ComfyUI update fail: The installed ComfyUI does not have a Git repository.")
         return {}
@@ -1186,3 +1226,5 @@ def unzip(model_path):
 
     os.remove(model_path)
     return True
+
+
